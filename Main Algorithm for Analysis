@@ -1,0 +1,163 @@
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(nomclust)
+library(mclust) #ARI
+library(e1071) #purity
+library(dbscan) #LOF
+library(arules) #FPOF
+library(doParallel) #FPOF
+
+# Imput parameters and settings
+datasets=1001:1100
+outliers = c("none","individual","group")
+measures=c("sm", "lin","eskin")
+linkage_method=c("average", "complete", "single")
+detection_method=c("without_detection","CBOD","LOF","FPOF")
+
+# Purity Function
+purity = function(truth, predicted) {
+  tab = table(truth, predicted)
+  sum(apply(tab, 2, max)) / length(truth)
+}
+
+# Create objects for storing evaluation criteria
+Purity_index=array(
+  data = NA,
+  dim = c(length(datasets),length(outliers),length(measures),length(linkage_method),length(detection_method)),
+  dimnames = list(
+    dataset=datasets,
+    outlier=outliers,
+    measure = measures,
+    linkage = linkage_method,
+    detection= detection_method
+  )
+)
+Purity_index[5,"none","sm",,]
+Adj_Rand_index=Purity_index
+Silhouette_index=Purity_index
+Dunn_index=Purity_index
+
+
+# Set wd
+setwd("C:/Users/1408e/OneDrive/Masaüstü/datasets")
+# list.files()
+# d=3
+# m="sm"
+# lm="average"
+# dm="CBOD"
+# o="individual"
+
+for(d in 1:length(datasets)){
+  for(o in outliers){
+    # Load the data
+    if(o=="none") {df=read.csv(paste("dataset", datasets[d],".csv",sep=""))}
+    if(o=="individual") {df=read.csv(paste("dataset", datasets[d],"_individual.csv",sep=""))}
+    if(o=="group") {df=read.csv(paste("dataset", datasets[d],"_group.csv",sep=""))}
+    for(m in measures){
+      for(lm in linkage_method){
+        print(paste(d,o,m,lm))
+        for(dm in detection_method){
+          print(dm)
+          if(dm=="without_detection"){
+            df_clean=df
+            hca.object=nomclust(df_clean[,1:5],measure = m,method = lm, clu.high = 3)
+          }
+          if(dm=="CBOD"){
+            df_clean=df
+            
+            tiny_cluster=TRUE #set True/False indicator to be True
+            while(tiny_cluster==TRUE){
+              hca.object=nomclust(df_clean[,1:5],measure = "sm",method = "average")
+              freq=table(hca.object$mem$clu_2) #how many obs. in each cluster?
+              cut.off=nrow(df_clean)/10 #assume max 10% outliers in the dataset
+              if(sum(freq<cut.off)>0){ #if there is 1 BIG cluster and 1 tiny cluster (with less than 10% of obs), its most likely an outlier
+                out=names(freq[freq<cut.off])
+                df_clean=df[-which(hca.object$mem$clu_2==out),] #delete obs from the tiny cluster
+                rm(hca.object,freq,cut.off,out)
+                #if(nrow(df_clean)<nrow(df)/2){tiny_cluster=FALSE} 
+              }else{tiny_cluster=FALSE} #we repeat the code until there is no tiny cluster in clustering solution with 2 clusters
+            }
+            hca.object=nomclust(df_clean[,1:5],measure = m,method = lm, clu.high = 3)
+            
+          }
+          if(dm=="LOF"){ #LOF "Points that are considered outliers produce scores significantly larger than 1." + we use boxplot method
+#print(nrow(df))
+            distance_matrix=nomclust(df[,1:5],measure = m,method = lm, clu.high = 3, prox = T)$prox
+            lof_scores=lof(distance_matrix)
+            lof_scores_cut=lof_scores[lof_scores<99]
+            cut_off=quantile(lof_scores_cut,0.75)+1.5*(quantile(lof_scores_cut,0.75)-quantile(lof_scores_cut,0.25))
+            if(sum(lof_scores>cut_off)>0){
+              df_clean=df[-which(lof_scores>cut_off),]
+            }else{df_clean=df}
+            
+            hca.object=nomclust(df_clean[,1:5],measure = m,method = lm, clu.high = 3)
+            rm(distance_matrix, lof_scores, cut_off)
+          }
+          if(dm=="FPOF"){
+#print(nrow(df))
+            tmp=df[,1:5]
+            for(i in 1:5){tmp[,i]=as.factor(as.character(tmp[,i]))}
+            result = try(FPOF(tmp), silent = TRUE) #sometimes FPOF returns error - not sure why
+            if (inherits(result, 'try-error')) { #if there is error put NA into results array
+              df_clean=df
+              hca.object=nomclust(df_clean[,1:5],measure = m,method = lm, clu.high = 3)
+              hca.object$eval$SI[3]=NA
+              hca.object$eval$DI[3]=NA
+              hca.object$mem$clu_3=rep(NA,nrow(df_clean))
+              #purity(df_clean$CLUSTER,hca.object$mem$clu_3)
+              #adjustedRandIndex(df_clean$CLUSTER,hca.object$mem$clu_3)
+            }else{ #if there is no error - work as we supposed to
+              fpof_scores = FPOF(tmp)$scores
+              cut_off=quantile(fpof_scores,0.25)-1.5*(quantile(fpof_scores,0.75)-quantile(fpof_scores,0.25))
+              df_clean=df[fpof_scores>cut_off,]
+              hca.object=nomclust(df_clean[,1:5],measure = m,method = lm, clu.high = 3)
+            }
+          rm(tmp, fpof_scores, cut_off,result)
+          }
+          
+          Purity_index[d,o,m,lm,dm] = purity(df_clean$CLUSTER,hca.object$mem$clu_3)
+          Adj_Rand_index[d,o,m,lm,dm] = adjustedRandIndex(df_clean$CLUSTER,hca.object$mem$clu_3)
+          Silhouette_index[d,o,m,lm,dm] = hca.object$eval$SI[3]
+          Dunn_index[d,o,m,lm,dm] = hca.object$eval$DI[3]
+          
+          rm(hca.object,df_clean)
+        }
+      }
+    }
+    rm(df)
+  }
+}
+datasets=1001:1100
+which(is.na(Purity_index)) #there are some NAs
+mean.na=function(x){mean(x,na.rm=T)}
+
+# q1: how much individual outliers affect outcomes of cluster analysis
+Purity_index[1,"none",,,"without_detection"] - Purity_index[1,"individual",,,"without_detection"] #for dataset 1, this quantifies how much outliers decrease purity (purity of data without outliers is compared with purity of data with outliers)
+tmp=Purity_index[1:length(datasets),"none",,,"without_detection"] - Purity_index[1:length(datasets),"individual",,,"without_detection"] #for all datasets, this quantifies how much outliers decrease purity (purity of data without outliers is compared with purity of data with outliers)
+tmp
+mean(tmp,na.rm=T) #point estimate of Purity decrease (after adding 5% outliers we can expect that purity decreases by 0.052)
+boxplot(as.vector(tmp)) #distribution of Purity decrease - you can see that after adding outliers usually purity decreases
+abline(h=0,col="red") 
+#95% CI for mean purity decrease:
+alpha=0.05
+mean(tmp,na.rm=T)-qnorm(1-alpha/2)*sd(tmp,na.rm=T)/sqrt(sum(!is.na(tmp))) #lower bound avg-q0.975*sd/sqrt(n)
+mean(tmp,na.rm=T)+qnorm(1-alpha/2)*sd(tmp,na.rm=T)/sqrt(sum(!is.na(tmp))) #upper bound avg+q0.975*sd/sqrt(n)                                                        
+                                                       
+apply(tmp, 2:3, mean.na) #average delta for all datasets based on linkage and measure
+
+
+# q2: how much deleting detected (individual) outliers using LOS improved clustering results?
+Purity_index[1,"individual",,,"without_detection"] - Purity_index[1,"individual",,,"LOF"] #comparison  of 1 dataset
+tmp=Purity_index[1:length(datasets),"group",,,"FPOF"] - Purity_index[1:length(datasets),"individual",,,"without_detection"] #for all datasets, this quantifies how much deleting outliers increases purity
+tmp
+mean(tmp,na.rm=T) #point estimate of Purity increase after detecting and deleting outliers with LOF method
+boxplot(as.vector(tmp)) #distribution of Purity increase - you can see that after deleting outliers usually purity decreases
+abline(h=0,col="red") 
+#95% CI for mean purity increase after deleting outliers with LOF:
+alpha=0.05
+mean(tmp,na.rm=T)-qnorm(1-alpha/2)*sd(tmp,na.rm=T)/sqrt(sum(!is.na(tmp))) #lower bound avg-q0.975*sd/sqrt(n)
+mean(tmp,na.rm=T)+qnorm(1-alpha/2)*sd(tmp,na.rm=T)/sqrt(sum(!is.na(tmp))) #upper bound avg+q0.975*sd/sqrt(n)                                                        
+
+
+apply(tmp, 2:3, mean.na) #average purity increase after LOF for all datasets
