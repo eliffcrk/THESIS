@@ -1,0 +1,90 @@
+# --- Required Libraries ---
+library(clusterGeneration)
+library(cluster)
+library(mclust)
+
+# Generate clustered multivariate continuous data 
+generate_clustered_data <- function(nclu, n_per_clu, nvar, dist) {
+  gen <- genRandomClust(numClust = nclu, sepVal = dist, numNonNoisy = nvar,
+                        numNoisy = 0, clustszind = 1, clustSizeEq = n_per_clu,
+                        covMethod = "eigen", quiet = TRUE, outputEmpirical = TRUE)
+  df <- data.frame(gen$datList)
+  df$cluster <- factor(rep(paste0("", 1:nclu), each = n_per_clu))
+  return(df)
+}
+
+#  Discretize into categorical variables 
+discretize_categorical <- function(df, nvar, ncat) {
+  dis_df <- data.frame(matrix(NA, nrow = nrow(df), ncol = nvar))
+  for (i in 1:nvar) {
+    dis_df[[i]] <- as.factor(cut(df[[i]], breaks = ncat[i], labels = FALSE, include.lowest = TRUE))
+  }
+  colnames(dis_df) <- paste0("var", 1:nvar)
+  dis_df$cluster <- df$cluster
+  return(dis_df)
+}
+
+# --- Generate outliers from rare combinations ---
+generate_outliers_by_joint_rarity <- function(n_outliers, nvar, ncat_vec, inlier_data) {
+  existing_combos <- apply(inlier_data[, paste0("var", 1:nvar)], 1, paste, collapse = "_")
+  existing_set <- unique(existing_combos)
+  
+  outliers <- list()
+  while (length(outliers) < n_outliers) {
+    candidate <- sapply(seq_len(nvar), function(j) sample(1:ncat_vec[j], 1))
+    candidate_str <- paste(candidate, collapse = "_")
+    if (!(candidate_str %in% existing_set)) {
+      outliers[[length(outliers) + 1]] <- candidate
+      existing_set <- c(existing_set, candidate_str)
+    }
+  }
+  
+  outlier_df <- as.data.frame(do.call(rbind, outliers))
+  colnames(outlier_df) <- paste0("var", 1:nvar)
+  outlier_df <- data.frame(lapply(outlier_df, factor))
+  outlier_df$cluster <- factor("outlier", levels = c(levels(inlier_data$cluster), "outlier"))
+  return(outlier_df)
+}
+
+# --- Settings ---
+nclu <- 3
+nvar <- 4
+ncat <- rep(3, nvar)
+n_per_clu <- 70
+dist <- 0.30
+outlier_ratio <- 0.05
+n_outliers <- ceiling(nclu * n_per_clu * outlier_ratio)
+
+#  Generate Inlier Data 
+inlier_continuous <- generate_clustered_data(nclu, n_per_clu, nvar, dist)
+inlier_data <- discretize_categorical(inlier_continuous, nvar, ncat)
+
+#  Generate Outliers
+outlier_data <- generate_outliers_by_joint_rarity(n_outliers, nvar, ncat, inlier_data)
+
+#  Combine Full Dataset 
+data_full <- rbind(inlier_data, outlier_data)
+data_full <- data_full[sample(nrow(data_full)), ]
+rownames(data_full) <- NULL
+
+#  Perform Clustering on All Data (including outliers) 
+# Convert factors to numerics for distance calculation
+data_numeric <- data.frame(lapply(data_full[, 1:nvar], function(x) as.numeric(as.character(x))))
+dist_matrix <- dist(data_numeric, method = "euclidean")
+hc <- hclust(dist_matrix, method = "ward.D2")
+predicted_clusters <- cutree(hc, k = nclu)
+data_full$cluster_pred <- factor(predicted_clusters)
+
+true_labels= data_full$cluster_pred 
+data=data_full[,-5]
+
+#  View Summary
+cat("✅ Cluster counts (truth):\n")
+print(table(data_full$cluster))
+cat("✅ Cluster counts (predicted):\n")
+print(table(data_full$cluster_pred))
+cat("\n🔍 Sample of final data:\n")
+print(head(data_full))
+
+#  Save output
+# write.csv(data_full, "synthetic_data_with_outliers_and_clusters.csv", row.names = FALSE)
